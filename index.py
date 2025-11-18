@@ -7,7 +7,19 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from bottle import route, run, template, post, request, static_file
+import re
+import binascii
 
+# Límites y patrones
+MAX_UNAME_LEN = 50
+MAX_EMAIL_LEN = 254
+MAX_PASSWORD_LEN = 128
+MIN_PASSWORD_LEN = 6
+MAX_NAME_LEN = 100
+MAX_TOKEN_LEN = 256
+MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB
+ALLOWED_IMAGE_EXT = {"jpg", "jpeg", "png", "gif", "bmp"}
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def loadDatabaseSettings(pathjs):
@@ -40,6 +52,83 @@ def getToken():
     return f"{P[:20]}{Q[20:]}"
 
 
+def is_valid_username(u):
+    if not isinstance(u, str):
+        return False
+    u = u.strip()
+    if not u or len(u) > MAX_UNAME_LEN:
+        return False
+    # permitir letras, números, guión bajo y puntos
+    return bool(re.match(r'^[A-Za-z0-9_.-]+$', u))
+
+
+def is_valid_email(e):
+    if not isinstance(e, str):
+        return False
+    e = e.strip()
+    if not e or len(e) > MAX_EMAIL_LEN:
+        return False
+    return bool(EMAIL_RE.match(e))
+
+
+def is_valid_password(p):
+    if not isinstance(p, str):
+        return False
+    if len(p) < MIN_PASSWORD_LEN or len(p) > MAX_PASSWORD_LEN:
+        return False
+    return True
+
+
+def sanitize_name(name):
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name or len(name) > MAX_NAME_LEN:
+        return None
+    # reemplazar caracteres peligrosos por '_'
+    safe = re.sub(r'[^A-Za-z0-9_\-\.]', '_', name)
+    # prevenir secuencias de traversal
+    if '..' in safe or '/' in safe or '\\' in safe:
+        return None
+    return safe
+
+
+def valid_token(tok):
+    if not isinstance(tok, str):
+        return False
+    tok = tok.strip()
+    if not tok or len(tok) > MAX_TOKEN_LEN:
+        return False
+    # token básico: solo caracteres imprimibles
+    if not re.match(r'^[A-Za-z0-9_\-\.]+$', tok):
+        return False
+    return True
+
+
+def decode_base64_limited(b64_str, max_bytes=MAX_IMAGE_BYTES):
+    if not isinstance(b64_str, str):
+        return None
+    try:
+        decoded = base64.b64decode(b64_str, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if len(decoded) > max_bytes:
+        return None
+    return decoded
+
+
+def to_int_strict(v):
+    try:
+        # aceptar ints o strings que representen ints
+        if isinstance(v, int):
+            return v
+        if isinstance(v, str) and v.isdigit():
+            return int(v)
+    except Exception:
+        pass
+    return None
+
+
 """
 */ 
 # Registro
@@ -69,6 +158,16 @@ def Registro():
     # TODO checar si estan vacio los elementos del json
     if not R:
         return {"R":-1}
+    # Validaciones adicionales (Parche 4)
+    uname = request.json.get("uname")
+    email = request.json.get("email")
+    password = request.json.get("password")
+    if not is_valid_username(uname):
+        return {"R":-1}
+    if not is_valid_email(email):
+        return {"R":-1}
+    if not is_valid_password(password):
+        return {"R":-1}
     # TODO validar correo en json
     # TODO Control de error de la DB
     R = False
@@ -76,7 +175,7 @@ def Registro():
         with db.cursor() as cursor:
             cursor.execute(
                 'INSERT INTO Usuario VALUES (NULL, %s, %s, MD5(%s))',
-                (request.json["uname"], request.json["email"], request.json["password"])
+                (uname.strip(), email.strip(), password)
             )
             R = cursor.lastrowid
             db.commit()
@@ -115,7 +214,13 @@ def Login():
     # TODO checar si estan vacio los elementos del json
     if not R:
         return {"R":-1}
-    
+    # Validaciones adicionales (Parche 4)
+    uname = request.json.get("uname")
+    password = request.json.get("password")
+    if not is_valid_username(uname):
+        return {"R":-1}
+    if not is_valid_password(password):
+        return {"R":-1}
     # TODO validar correo en json
     # TODO Control de error de la DB
     R = False
@@ -123,7 +228,7 @@ def Login():
         with db.cursor() as cursor:
             cursor.execute(
                 'SELECT id FROM Usuario WHERE uname=%s AND password=MD5(%s)',
-                (request.json["uname"], request.json["password"])
+                (uname.strip(), password)
             )
             R = cursor.fetchall()
     except Exception as e: 
@@ -181,26 +286,31 @@ def Imagen():
     if not R:
         return {"R":-1}
 
-    name = request.json["name"].strip()
-    ext = request.json["ext"].strip().lower()
-    data_b64 = request.json["data"]
+    name_raw = request.json.get("name")
+    ext_raw = request.json.get("ext")
+    data_b64 = request.json.get("data")
+    token = request.json.get("token")
 
-    if not name or not ext or not data_b64:
+    # Validaciones generales (Parche 4)
+    if not isinstance(name_raw, str) or not isinstance(ext_raw, str) or not isinstance(data_b64, str):
         return {"R":-1}
 
-    if "/" in name or "\\" in name or ".." in name:
+    if not valid_token(token):
         return {"R":-1}
 
+    name = sanitize_name(name_raw)
+    if not name:
+        return {"R":-1}
+
+    ext = ext_raw.strip().lower()
     if "\x00" in ext:
         return {"R":-1}
 
-    ALLOWED = {"jpg", "jpeg", "png", "gif", "bmp"}
-    if ext not in ALLOWED:
+    if ext not in ALLOWED_IMAGE_EXT:
         return {"R":-1}
 
-    try:
-        decoded = base64.b64decode(data_b64)
-    except Exception:
+    decoded = decode_base64_limited(data_b64, MAX_IMAGE_BYTES)
+    if decoded is None:
         return {"R":-1}
 
     dbcnf = loadDatabaseSettings('db.json');
@@ -211,7 +321,7 @@ def Imagen():
         password = dbcnf['password']
     )
 
-    TKN = request.json['token'];
+    TKN = token;
     
     R = False
     try:
@@ -226,6 +336,10 @@ def Imagen():
         db.close()
         return {"R":-2}
     
+    if not R:
+        db.close()
+        return {"R":-2}
+
     id_Usuario = R[0][0];
 
     with open(f'tmp/{id_Usuario}',"wb") as imagen:
@@ -286,15 +400,24 @@ def Descargar():
     if not R:
         return {"R":-1}
     
-    TKN = request.json['token'];
-    idImagen = request.json['id'];
-    
+    token = request.json.get("token")
+    idImagen_raw = request.json.get("id")
+
+    if not valid_token(token):
+        return {"R":-1}
+
+    idImagen = to_int_strict(idImagen_raw)
+    if idImagen is None:
+        return {"R":-1}
+    if idImagen < 0:
+        return {"R":-1}
+
     R = False
     try:
         with db.cursor() as cursor:
             cursor.execute(
                 'SELECT id_Usuario FROM AccesoToken WHERE token=%s',
-                (TKN,)
+                (token,)
             )
             R = cursor.fetchall()
     except Exception as e: 
