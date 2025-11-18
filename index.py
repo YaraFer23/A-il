@@ -181,10 +181,6 @@ def Imagen():
     if not R:
         return {"R":-1}
 
-    # ----------------------------
-    # PARCHE 2: Validación y sanitización de archivos subidos
-    # ----------------------------
-
     name = request.json["name"].strip()
     ext = request.json["ext"].strip().lower()
     data_b64 = request.json["data"]
@@ -306,20 +302,23 @@ def Descargar():
         db.close()
         return {"R":-2}
         
+    
     try:
         with db.cursor() as cursor:
             cursor.execute(
-                'SELECT name, ruta FROM Imagen WHERE id=%s',
-                (idImagen,)
+                'SELECT name, ruta FROM Imagen WHERE id=%s AND id_Usuario=%s',
+                (idImagen, R[0][0])
             )
             R = cursor.fetchall()
     except Exception as e: 
         print(e)
         db.close()
         return {"R":-3}
-
-    print(Path("img").resolve(),R[0][1])
-    return static_file(R[0][1],Path(".").resolve())
+    if not R:
+        db.close()
+        return {"R":-4}
+    filename = Path(R[0][1]).name
+    return static_file(filename, str(Path("img").resolve()))
 
 if __name__ == '__main__':
     run(host='localhost', port=8080, debug=True)
