@@ -86,9 +86,6 @@ def Registro():
         return {"R":-2}
     return {"R":0,"D":R}
 
-
-
-
 """
 /*
  * Este Registro recibe un JSON con el siguiente formato
@@ -96,7 +93,6 @@ def Registro():
  * : 
  *        "uname": "XXX",
  *        "password": "XXX"
- * 
  * 
  * Debe retornar un Token 
  * */
@@ -135,7 +131,6 @@ def Login():
         db.close()
         return {"R":-2}
     
-    
     if not R:
         db.close()
         return {"R":-3}
@@ -144,7 +139,6 @@ def Login():
     with open("/tmp/log","a") as log:
         log.write(f'Delete from AccesoToken where id_Usuario = "{R[0][0]}"\n')
         log.write(f'insert into AccesoToken values({R[0][0]},"{T}",now())\n')
-    
     
     try:
         with db.cursor() as cursor:
@@ -162,12 +156,10 @@ def Login():
 /*
  * Este subir imagen recibe un JSON con el siguiente formato
  * 
- * 
  *         "token: "XXX"
  *        "name": "XXX",
  *         "data": "XXX",
  *         "ext": "PNG"
- * 
  * 
  * Debe retornar codigo de estado
  * */
@@ -188,7 +180,33 @@ def Imagen():
     R = 'name' in request.json  and 'data' in request.json and 'ext' in request.json  and 'token' in request.json
     if not R:
         return {"R":-1}
-    
+
+    # ----------------------------
+    # PARCHE 2: Validación y sanitización de archivos subidos
+    # ----------------------------
+
+    name = request.json["name"].strip()
+    ext = request.json["ext"].strip().lower()
+    data_b64 = request.json["data"]
+
+    if not name or not ext or not data_b64:
+        return {"R":-1}
+
+    if "/" in name or "\\" in name or ".." in name:
+        return {"R":-1}
+
+    if "\x00" in ext:
+        return {"R":-1}
+
+    ALLOWED = {"jpg", "jpeg", "png", "gif", "bmp"}
+    if ext not in ALLOWED:
+        return {"R":-1}
+
+    try:
+        decoded = base64.b64decode(data_b64)
+    except Exception:
+        return {"R":-1}
+
     dbcnf = loadDatabaseSettings('db.json');
     db = mysql.connector.connect(
         host='localhost', port = dbcnf['port'],
@@ -212,16 +230,16 @@ def Imagen():
         db.close()
         return {"R":-2}
     
-    
     id_Usuario = R[0][0];
+
     with open(f'tmp/{id_Usuario}',"wb") as imagen:
-        imagen.write(base64.b64decode(request.json['data'].encode()))
+        imagen.write(decoded)
     
     try:
         with db.cursor() as cursor:
             cursor.execute(
                 'INSERT INTO Imagen VALUES (NULL, %s, %s, %s)',
-                (request.json["name"], "img/", id_Usuario)
+                (name, "img/", id_Usuario)
             )
             cursor.execute(
                 'SELECT MAX(id) AS idImagen FROM Imagen WHERE id_Usuario=%s',
@@ -232,31 +250,28 @@ def Imagen():
 
             cursor.execute(
                 'UPDATE Imagen SET ruta=%s WHERE id=%s',
-                (f'img/{idImagen}.{request.json["ext"]}', idImagen)
+                (f'img/{idImagen}.{ext}', idImagen)
             )
             db.commit()
 
-            shutil.move('tmp/'+str(id_Usuario), 'img/'+str(idImagen)+'.'+str(request.json['ext']))
+            shutil.move('tmp/'+str(id_Usuario), 'img/'+str(idImagen)+'.'+ext)
             return {"R":0,"D":idImagen}
     except Exception as e: 
         print(e)
         db.close()
         return {"R":-3}
-    
+
 
 """
 /*
  * Este Registro recibe un JSON con el siguiente formato
  * 
- * : 
  *         "token: "XXX",
  *         "id": "XXX"
- * 
  * 
  * Debe retornar un Token 
  * */
 """
-
 @post('/Descargar')
 def Descargar():
     dbcnf = loadDatabaseSettings('db.json');
@@ -266,7 +281,6 @@ def Descargar():
         user = dbcnf['user'],
         password = dbcnf['password']
     )
-    
     
     ###/ obtener el cuerpo de la peticion
     if not request.json:
@@ -292,7 +306,6 @@ def Descargar():
         db.close()
         return {"R":-2}
         
-    
     try:
         with db.cursor() as cursor:
             cursor.execute(
@@ -304,6 +317,7 @@ def Descargar():
         print(e)
         db.close()
         return {"R":-3}
+
     print(Path("img").resolve(),R[0][1])
     return static_file(R[0][1],Path(".").resolve())
 
